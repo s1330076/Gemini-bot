@@ -3,18 +3,20 @@ import crypto from "crypto";
 import axios from "axios";
 
 const app = express();
-app.use(express.json());
+
+// LINE の署名検証には「生のリクエストボディ」が必要
+app.use(express.raw({ type: "*/*" }));
 
 // Secrets
 const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 const LINE_SECRET = process.env.LINE_CHANNEL_SECRET;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// LINE署名検証
-function validateSignature(body, signature) {
+// LINE署名検証（rawBody を使う）
+function validateSignature(rawBody, signature) {
   const hash = crypto
     .createHmac("sha256", LINE_SECRET)
-    .update(JSON.stringify(body))
+    .update(rawBody)
     .digest("base64");
   return hash === signature;
 }
@@ -49,13 +51,18 @@ async function replyToLine(replyToken, message) {
 app.post("/webhook", async (req, res) => {
   const signature = req.headers["x-line-signature"];
 
+  // 署名検証（rawBody を使う）
   if (!validateSignature(req.body, signature)) {
     return res.status(401).send("Unauthorized");
   }
 
-  res.sendStatus(200); // 即時返却
+  // LINEへ即時レスポンス
+  res.sendStatus(200);
 
-  const event = req.body.events[0];
+  // JSONに変換
+  const body = JSON.parse(req.body.toString());
+  const event = body.events[0];
+
   if (event.type === "message") {
     const userMessage = event.message.text;
     const replyToken = event.replyToken;
@@ -71,6 +78,3 @@ app.post("/webhook", async (req, res) => {
 app.get("/healthz", (req, res) => res.send("OK"));
 
 app.listen(3000, () => console.log("Server running"));
-
-
-app.get("/healthz", (req, res) => res.send("OK"));
