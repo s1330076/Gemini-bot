@@ -4,58 +4,187 @@ import axios from "axios";
 
 const app = express();
 
-// Webhook だけ raw を使う（これが最も安全）
-app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  const signature = req.headers["x-line-signature"];
+app.post(
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
 
-  // 署名検証
-  const hash = crypto
-    .createHmac("sha256", process.env.LINE_CHANNEL_SECRET)
-    .update(req.body)
-    .digest("base64");
+    console.log("===== LINE WEBHOOK RECEIVED =====");
 
-  if (hash !== signature) {
-    return res.status(401).send("Unauthorized");
-  }
+    try {
+      // --------------------------------
+      // 1. LINE署名を確認
+      // --------------------------------
 
-  // 即時レスポンス（LINEの1秒ルール）
-  res.sendStatus(200);
+      const signature = req.headers["x-line-signature"];
 
-  // JSONに変換
-  const body = JSON.parse(req.body.toString());
-  const event = body.events[0];
-
-  if (event.type === "message") {
-    const userMessage = event.message.text;
-    const replyToken = event.replyToken;
-
-    // Gemini呼び出し
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const response = await axios.post(url, {
-      contents: [{ parts: [{ text: userMessage }] }]
-    });
-
-    const aiReply = response.data.candidates[0].content.parts[0].text;
-    const trimmed = aiReply.slice(0, 4900);
-
-    // LINE返信
-    await axios.post(
-      "https://api.line.me/v2/bot/message/reply",
-      {
-        replyToken,
-        messages: [{ type: "text", text: trimmed }]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
-          "Content-Type": "application/json"
-        }
+      if (!signature) {
+        console.log("ERROR: x-line-signature がありません");
+        return res.sendStatus(401);
       }
-    );
+
+      const hash = crypto
+        .createHmac("sha256", process.env.LINE_CHANNEL_SECRET)
+        .update(req.body)
+        .digest("base64");
+
+      if (hash !== signature) {
+        console.log("ERROR: LINE署名が一致しません");
+        return res.sendStatus(401);
+      }
+
+      console.log("LINE署名 OK");
+
+      // --------------------------------
+      // 2. LINEに即200を返す
+      // --------------------------------
+
+      res.sendStatus(200);
+
+      // --------------------------------
+      // 3. JSON解析
+      // --------------------------------
+
+      const body = JSON.parse(req.body.toString("utf8"));
+
+      console.log("LINE EVENT:", JSON.stringify(body));
+
+      if (!body.events || body.events.length === 0) {
+        console.log("イベントなし");
+        return;
+      }
+
+      const event = body.events[0];
+
+      // --------------------------------
+      // 4. メッセージイベントか確認
+      // --------------------------------
+
+      if (event.type !== "message") {
+        console.log("メッセージイベントではありません:", event.type);
+        return;
+      }
+
+      if (event.message.type !== "text") {
+        console.log("テキストメッセージではありません");
+        return;
+      }
+
+      const userMessage = event.message.text;
+      const replyToken = event.replyToken;
+
+      console.log("ユーザー:", userMessage);
+      console.log("replyToken取得 OK");
+
+      // --------------------------------
+      // 5. Gemini
+      // --------------------------------
+
+      console.log("Geminiに問い合わせ開始");
+
+      const geminiUrl =
+        `https://generativelanguage.googleapis.com/v1beta/models/` +
+        `gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+      const geminiResponse = await axios.post(
+        geminiUrl,
+        {
+          contents: [
+            {
+              parts: [
+                {
+                  text: userMessage
+                }
+              ]
+            }
+          ]
+        },
+        {
+          headers: {
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      console.log("Gemini response OK");
+
+      const aiReply =
+        geminiResponse.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!aiReply) {
+        console.log(
+          "Geminiの回答を取得できませんでした:",
+          JSON.stringify(geminiResponse.data)
+        );
+        return;
+      }
+
+      const trimmed = aiReply.slice(0, 4900);
+
+      console.log("Gemini回答:", trimmed);
+
+      // --------------------------------
+      // 6. LINEへ返信
+      // --------------------------------
+
+      console.log("LINE返信開始");
+
+      const lineResponse = await axios.post(
+        "https://api.line.me/v2/bot/message/reply",
+        {
+          replyToken: replyToken,
+          messages: [
+            {
+              type: "text",
+              text: trimmed
+            }
+          ]
+        },
+        {
+          headers: {
+            Authorization:
+              `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      console.log("LINE返信成功");
+      console.log("LINE response:", lineResponse.data);
+
+    } catch (error) {
+
+      console.error("===== ERROR =====");
+
+      if (error.response) {
+        console.error("Status:", error.response.status);
+        console.error(
+          "Response:",
+          JSON.stringify(error.response.data)
+        );
+      } else {
+        console.error("Error:", error.message);
+      }
+
+      console.error("=================");
+    }
   }
+);
+
+// --------------------------------
+// Health check
+// --------------------------------
+
+app.get("/healthz", (req, res) => {
+  res.send("OK");
 });
 
-// Health check
-app.get("/healthz", (req, res) => res.send("OK"));
+// --------------------------------
+// Render用PORT
+// --------------------------------
 
-app.listen(3000, () => console.log("Server running"));
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
