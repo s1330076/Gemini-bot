@@ -4,59 +4,21 @@ import axios from "axios";
 
 const app = express();
 
-// LINE の署名検証には「生のリクエストボディ」が必要
-app.use(express.raw({ type: "*/*" }));
-
-// Secrets
-const LINE_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-const LINE_SECRET = process.env.LINE_CHANNEL_SECRET;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-// LINE署名検証（rawBody を使う）
-function validateSignature(rawBody, signature) {
-  const hash = crypto
-    .createHmac("sha256", LINE_SECRET)
-    .update(rawBody)
-    .digest("base64");
-  return hash === signature;
-}
-
-// Geminiへ送信
-async function askGemini(text) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-  const response = await axios.post(url, {
-    contents: [{ parts: [{ text }] }]
-  });
-  return response.data.candidates[0].content.parts[0].text;
-}
-
-// LINEへ返信
-async function replyToLine(replyToken, message) {
-  await axios.post(
-    "https://api.line.me/v2/bot/message/reply",
-    {
-      replyToken,
-      messages: [{ type: "text", text: message }]
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${LINE_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-}
-
-// Webhook
-app.post("/webhook", async (req, res) => {
+// Webhook だけ raw を使う（これが最も安全）
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const signature = req.headers["x-line-signature"];
 
-  // 署名検証（rawBody を使う）
-  if (!validateSignature(req.body, signature)) {
+  // 署名検証
+  const hash = crypto
+    .createHmac("sha256", process.env.LINE_CHANNEL_SECRET)
+    .update(req.body)
+    .digest("base64");
+
+  if (hash !== signature) {
     return res.status(401).send("Unauthorized");
   }
 
-  // LINEへ即時レスポンス
+  // 即時レスポンス（LINEの1秒ルール）
   res.sendStatus(200);
 
   // JSONに変換
@@ -67,10 +29,29 @@ app.post("/webhook", async (req, res) => {
     const userMessage = event.message.text;
     const replyToken = event.replyToken;
 
-    const aiReply = await askGemini(userMessage);
+    // Gemini呼び出し
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const response = await axios.post(url, {
+      contents: [{ parts: [{ text: userMessage }] }]
+    });
 
-    const trimmed = aiReply.slice(0, 4900); // LINE制限対策
-    await replyToLine(replyToken, trimmed);
+    const aiReply = response.data.candidates[0].content.parts[0].text;
+    const trimmed = aiReply.slice(0, 4900);
+
+    // LINE返信
+    await axios.post(
+      "https://api.line.me/v2/bot/message/reply",
+      {
+        replyToken,
+        messages: [{ type: "text", text: trimmed }]
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
   }
 });
 
