@@ -188,3 +188,17 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+app.get("/models", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`
+    );
+
+    res.json(response.data);
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    res.status(500).json(error.response?.data || {
+      error: error.message
+    });
+  }
+});
